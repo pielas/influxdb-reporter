@@ -41,10 +41,13 @@ abstract class BaseReporter[S](metricRegistry: MetricRegistry,
     for {
       collectedMetrics <- collectedMetricsFuture
       notYetSendMetrics = collectedMetrics ::: notYetSentMetricsFromBuffer
+      _ <- Future(logger.debug("Partitioning metrics"))
       batches = batcher.partition(notYetSendMetrics)
+      - <- Future(logger.debug("Sending metrics to influx"))
       reported <- reportMetricBatchesSequentially(batches) {
         client.sendData
       }
+      - <- Future(logger.debug("Updating buffer with unsent metrics"))
       _ = updateNotSentMetricsBuffer(reported)
     } yield reported
   }
@@ -76,17 +79,22 @@ abstract class BaseReporter[S](metricRegistry: MetricRegistry,
 
   private def collectMetrics[M <: CodahaleMetric](metrics: Map[String, (Metric[M], MetricCollector[M])]): Future[List[WriterData[S]]] = {
     val timestamp = clock.getTimeInNanos
-    Future.sequence(metrics.toList.map {
-      case (name, (metric, collector)) =>
-        metric.popMetrics.map {
-          _.flatMap {
-            case MetricByTag(tags, m, timestampOpt) =>
-              val result = collector.collect(writer, name, m, timestampOpt.getOrElse(timestamp), tags: _*)
-              if(result.isEmpty) logger.warn(s"Metric $name was skipped because collector returns nothing")
-              result
+    for {
+      _ <- Future(logger.debug("Started metrics collection"))
+      collectedMetrics <- Future.sequence(metrics.toList.map {
+        case (name, (metric, collector)) =>
+          metric.popMetrics.map {
+            _.flatMap {
+              case MetricByTag(tags, m, timestampOpt) =>
+                val result = collector.collect(writer, name, m, timestampOpt.getOrElse(timestamp), tags: _*)
+                if(result.isEmpty) logger.warn(s"Metric $name was skipped because collector returns nothing")
+                result
+            }
           }
-        }
-    }).map(listOfLists => listOfLists.flatten)
+      }).map(listOfLists => listOfLists.flatten)
+      _ <- Future(logger.debug("Finished metrics collection"))
+    } yield collectedMetrics
+
   }
 
   protected case class BatchReportingResult[T](batch: List[WriterData[T]], reported: Boolean)
